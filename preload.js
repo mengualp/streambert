@@ -126,6 +126,23 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.invoke("secure-store-get", key).then((r) => r.value ?? null),
   secureSet: (key, value) =>
     ipcRenderer.invoke("secure-store-set", { key, value }),
+  // Picture-in-Picture pop-out (full player UI, only one stream active at a time)
+  openPipWindow: (url, title) =>
+    ipcRenderer.invoke("open-pip-window", { url, title }),
+  closePipWindow: () => ipcRenderer.invoke("close-pip-window"),
+  getPipWebContentsId: () => ipcRenderer.invoke("get-pip-webcontents-id"),
+  onPipOpened: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on("pip-window-opened", h);
+    return h;
+  },
+  offPipOpened: (h) => ipcRenderer.removeListener("pip-window-opened", h),
+  onPipClosed: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on("pip-window-closed", h);
+    return h;
+  },
+  offPipClosed: (h) => ipcRenderer.removeListener("pip-window-closed", h),
   // Window controls (Windows custom titlebar)
   windowMinimize: () => ipcRenderer.invoke("window-minimize"),
   windowToggleMaximize: () => ipcRenderer.invoke("window-toggle-maximize"),
