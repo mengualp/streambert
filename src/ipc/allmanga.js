@@ -6,6 +6,7 @@
 const { ipcMain } = require("electron");
 const https = require("https");
 const http = require("http");
+const crypto = require("crypto");
 
 // ── AllAnime hex cipher (from ani-cli) ────────────────────────────────────────
 
@@ -107,7 +108,63 @@ function decodeAllanimeUrl(encoded) {
   return result.replace(/\\u002F/gi, "/").replace(/\\\|/g, "");
 }
 
-// ── Plain HTTPS GET for clock.json endpoints ──────────────────────────────────
+// ── AllAnime AES-256-CTR decryption (for "tobeparsed" encrypted responses) ────
+// Mirrors ani-cli's decode_tobeparsed: blob is base64, bytes 1-12 are the IV,
+// bytes 13..(len-16) are the ciphertext, key = SHA256("Xot36i3lK3:v1").
+
+const ALLANIME_KEY = crypto
+  .createHash("sha256")
+  .update("Xot36i3lK3:v1")
+  .digest();
+
+function decodeTobeparsed(blob) {
+  try {
+    const buf = Buffer.from(blob, "base64");
+    const iv12 = buf.slice(1, 13); // 12-byte
+    const iv16 = Buffer.concat([iv12, Buffer.from([0, 0, 0, 2])]); // counter 0x00000002
+    const ct = buf.slice(13, buf.length - 16); // strip 13-byte prefix + 16-byte auth tag
+    const decipher = crypto.createDecipheriv("aes-256-ctr", ALLANIME_KEY, iv16);
+    decipher.setAutoPadding(false);
+    const plain = Buffer.concat([
+      decipher.update(ct),
+      decipher.final(),
+    ]).toString("utf8");
+    // Extract sourceUrl / sourceName pairs from the decrypted JSON blob
+    const sources = [];
+    for (const chunk of plain.split(/[{}]/)) {
+      const urlMatch = chunk.match(/"sourceUrl"\s*:\s*"(--[^"]+)"/);
+      const nameMatch = chunk.match(/"sourceName"\s*:\s*"([^"]+)"/);
+      const prioMatch = chunk.match(/"priority"\s*:\s*([0-9.]+)/);
+      if (urlMatch) {
+        sources.push({
+          sourceUrl: urlMatch[1],
+          sourceName: nameMatch ? nameMatch[1] : "",
+          priority: prioMatch ? parseFloat(prioMatch[1]) : 0,
+        });
+      }
+    }
+    return sources;
+  } catch {
+    return [];
+  }
+}
+
+// Parses an episode GQL response body and returns sourceUrls
+function parseEpisodeSourceUrls(body) {
+  // Check for tobeparsed first (encrypted path)
+  const tbMatch = body.match(/"tobeparsed"\s*:\s*"([^"]+)"/);
+  if (tbMatch) {
+    const sources = decodeTobeparsed(tbMatch[1]);
+    if (sources.length) return sources;
+  }
+  // Standard unencrypted path
+  try {
+    const sourceUrls = JSON.parse(body)?.data?.episode?.sourceUrls;
+    return sourceUrls?.length ? sourceUrls : null;
+  } catch {
+    return null;
+  }
+}
 
 function httpsGet(urlStr) {
   return new Promise((resolve, reject) => {
@@ -153,6 +210,90 @@ function httpsGet(urlStr) {
       req.end();
     }
     doGet(urlStr);
+  });
+}
+
+// Follows HTTP(S) redirects and returns the final URL (no body read).
+// Used for fast4speed.rsvp Yt-mp4 sources which are redirect chains to CDN URLs.
+function followRedirects(urlStr, maxHops = 10) {
+  return new Promise((resolve, reject) => {
+    let hops = 0;
+    function step(url) {
+      if (++hops > maxHops) return resolve(url); // treat final hop as result
+      let u;
+      try {
+        u = new URL(url);
+      } catch {
+        return reject(new Error("invalid url: " + url));
+      }
+      const lib = u.protocol === "https:" ? https : http;
+      const req = lib.request(
+        {
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          method: "HEAD",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            Referer: "https://allmanga.to",
+            Accept: "*/*",
+          },
+        },
+        (res) => {
+          res.resume();
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            const loc = res.headers.location.startsWith("http")
+              ? res.headers.location
+              : new URL(res.headers.location, url).href;
+            step(loc);
+          } else {
+            // Non-redirect → this is the final URL
+            resolve(url);
+          }
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(10000, () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+      req.end();
+    }
+    step(urlStr);
+  });
+}
+
+// Resolves a YouTube URL to a direct stream using yt-dlp.
+// Returns the best mp4/webm URL, or null if yt-dlp is not available.
+function resolveWithYtdlp(youtubeUrl) {
+  return new Promise((resolve) => {
+    const { spawnSync } = require("child_process");
+    // Check if yt-dlp is available
+    const which = spawnSync(
+      process.platform === "win32" ? "where" : "which",
+      ["yt-dlp"],
+      { encoding: "utf8" },
+    );
+    if (which.status !== 0) return resolve(null);
+
+    const result = spawnSync(
+      "yt-dlp",
+      [
+        "--no-playlist",
+        "-f",
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "-g", // print URL only
+        youtubeUrl,
+      ],
+      { encoding: "utf8", timeout: 30000 },
+    );
+    if (result.status !== 0 || !result.stdout?.trim()) return resolve(null);
+    // yt-dlp -g may return multiple lines (video+audio); take first
+    resolve(result.stdout.trim().split("\n")[0]);
   });
 }
 
@@ -313,6 +454,62 @@ const SPLIT_SEASONS = {
 
 const SEARCH_GQL = `query($search:SearchInput $limit:Int $page:Int $translationType:VaildTranslationTypeEnumType $countryOrigin:VaildCountryOriginEnumType){shows(search:$search limit:$limit page:$page translationType:$translationType countryOrigin:$countryOrigin){edges{_id name availableEpisodes __typename}}}`;
 const EPISODE_GQL = `query($showId:String! $translationType:VaildTranslationTypeEnumType! $episodeString:String!){episode(showId:$showId translationType:$translationType episodeString:$episodeString){episodeString sourceUrls}}`;
+
+// SHA-256 hash of EPISODE_GQL, used for Automatic Persisted Queries (APQ).
+// Mirrors ani-cli's query_hash fix: GET with APQ + Origin: youtu-chan.com bypasses
+// the Cloudflare block that broke AllAnime for POST-only clients.
+const EPISODE_GQL_HASH =
+  "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
+
+// Episode-specific GQL: try GET with APQ first (ani-cli fix), fall back to POST.
+// The GET request uses Origin: https://youtu-chan.com which is accepted by AllAnime.
+// Only falls back to POST if the GET response is empty or lacks "tobeparsed".
+async function allanimeGQLEpisode(variables) {
+  try {
+    const encodedVars = encodeURIComponent(JSON.stringify(variables));
+    const extensions = JSON.stringify({
+      persistedQuery: { version: 1, sha256Hash: EPISODE_GQL_HASH },
+    });
+    const encodedExt = encodeURIComponent(extensions);
+    const getUrl = `https://api.allanime.day/api?variables=${encodedVars}&extensions=${encodedExt}`;
+
+    const getRes = await new Promise((resolve, reject) => {
+      const u = new URL(getUrl);
+      const req = https.request(
+        {
+          hostname: u.hostname,
+          path: u.pathname + u.search,
+          method: "GET",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            Referer: "https://allmanga.to",
+            Origin: "https://youtu-chan.com",
+            Accept: "*/*",
+          },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => resolve({ status: res.statusCode, body: data }));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(12000, () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+      req.end();
+    });
+
+    if (getRes.body && getRes.body.includes("tobeparsed")) return getRes;
+  } catch {
+    // fall through to POST
+  }
+
+  // Fallback: standard POST with full GQL body
+  return allanimeGQL(variables, EPISODE_GQL);
+}
 const PROVIDER_PRIORITY = ["S-mp4", "Luf-Mp4", "Yt-mp4", "Default", "Sl-Hls"];
 
 // ── Resolve from known show ID ─────────────────────────────────────────────────
@@ -323,19 +520,16 @@ async function resolveEpisodeFromId(showId, epStr, dubSub) {
 
   let sourceUrls = null;
   for (const attempt of candidates) {
-    const epRes = await allanimeGQL(
-      { showId, translationType: dubSub, episodeString: attempt },
-      EPISODE_GQL,
-    );
+    const epRes = await allanimeGQLEpisode({
+      showId,
+      translationType: dubSub,
+      episodeString: attempt,
+    });
     if (!epRes.body) continue;
-    try {
-      const urls = JSON.parse(epRes.body)?.data?.episode?.sourceUrls;
-      if (urls?.length) {
-        sourceUrls = urls;
-        break;
-      }
-    } catch {
-      continue;
+    const urls = parseEpisodeSourceUrls(epRes.body);
+    if (urls?.length) {
+      sourceUrls = urls;
+      break;
     }
   }
   if (!sourceUrls) return null;
@@ -366,6 +560,53 @@ async function trySourceUrls(sourceUrls) {
       fetchUrl = "https://allanime.day/" + fetchUrl;
 
     try {
+      // ── Yt-mp4 / fast4speed.rsvp: not a clock.json endpoint, it's a redirect
+      // chain to a direct CDN or YouTube URL (mirrors ani-cli's "Yt >" handling).
+      if (fetchUrl.includes("fast4speed.rsvp") || src.sourceName === "Yt-mp4") {
+        const finalUrl = await followRedirects(fetchUrl).catch(() => null);
+        if (!finalUrl) continue;
+
+        // Direct CDN video (mp4/m3u8/googlevideo) → play immediately
+        let isGoogleVideoHost = false;
+        try {
+          const parsedFinalUrl = new URL(finalUrl);
+          const host = parsedFinalUrl.hostname.toLowerCase();
+          isGoogleVideoHost =
+            host === "googlevideo.com" || host.endsWith(".googlevideo.com");
+        } catch {
+          isGoogleVideoHost = false;
+        }
+        if (
+          /\.(mp4|webm|mkv|m3u8)(\?|$)/i.test(finalUrl) ||
+          isGoogleVideoHost ||
+          (!finalUrl.includes("youtube.com/watch") &&
+            !finalUrl.includes("youtu.be/"))
+        ) {
+          return {
+            ok: true,
+            url: finalUrl,
+            resolution: "?",
+            sourceName: src.sourceName,
+            isDirectMp4: !finalUrl.includes(".m3u8"),
+            referer: "https://allmanga.to",
+          };
+        }
+
+        // Landed on a YouTube watch page → try yt-dlp
+        const ytStream = await resolveWithYtdlp(finalUrl).catch(() => null);
+        if (ytStream) {
+          return {
+            ok: true,
+            url: ytStream,
+            resolution: "?",
+            sourceName: src.sourceName,
+            isDirectMp4: true,
+            referer: "https://www.youtube.com",
+          };
+        }
+        continue; // yt-dlp not available or failed → try next provider
+      }
+
       const linkRes = await httpsGet(fetchUrl);
       if (linkRes.status !== 200 || !linkRes.body) continue;
       let linkJson;
@@ -662,23 +903,23 @@ function register() {
           edges[0];
 
         // 6. Get episode sourceUrls
-        const epRes = await allanimeGQL(
-          { showId: anime._id, translationType: dubSub, episodeString: epStr },
-          EPISODE_GQL,
-        );
-        if (!epRes.body) return { ok: false, error: "Empty episode response" };
+        const epCandidates = [epStr];
+        if (!epStr.includes(".")) epCandidates.push(epStr + ".0");
 
-        let epJson;
-        try {
-          epJson = JSON.parse(epRes.body);
-        } catch {
-          return {
-            ok: false,
-            error: "Episode parse error: " + epRes.body.slice(0, 200),
-          };
+        let sourceUrls = null;
+        for (const attempt of epCandidates) {
+          const epRes = await allanimeGQLEpisode({
+            showId: anime._id,
+            translationType: dubSub,
+            episodeString: attempt,
+          });
+          if (!epRes.body) continue;
+          const urls = parseEpisodeSourceUrls(epRes.body);
+          if (urls?.length) {
+            sourceUrls = urls;
+            break;
+          }
         }
-
-        const sourceUrls = epJson?.data?.episode?.sourceUrls;
         if (!sourceUrls?.length)
           return { ok: false, error: "No sourceUrls for ep " + epStr };
 
@@ -708,13 +949,14 @@ function register() {
           translationType: "sub",
           episodeString: String(args.epNum || 1),
         };
-        const r = await allanimeGQL(vars, EPISODE_GQL);
+        const r = await allanimeGQLEpisode(vars);
         let parsed;
         try {
           parsed = JSON.parse(r.body);
         } catch {}
-        if (parsed?.data?.episode?.sourceUrls) {
-          parsed._decoded = parsed.data.episode.sourceUrls
+        const decodedUrls = parseEpisodeSourceUrls(r.body);
+        if (decodedUrls?.length) {
+          parsed._decoded = decodedUrls
             .filter((s) => s.sourceUrl?.startsWith("--"))
             .map((s) => {
               const p = decodeAllanimeUrl(s.sourceUrl).replace(
