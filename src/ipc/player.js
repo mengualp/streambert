@@ -210,6 +210,12 @@ function register(getMainWindow, { writeSecretMigration }) {
 
   ipcMain.handle("download-and-install-update", async (_, { url, format }) => {
     try {
+      const TRUSTED_PREFIX = "https://github.com/truelockmc/streambert/releases/download/";
+      const parsed = new URL(url);
+      if (!parsed.href.startsWith(TRUSTED_PREFIX)) {
+        return { ok: false, error: "Unauthorized update source" };
+      }
+
       _updateAbortController = new AbortController();
       const { signal } = _updateAbortController;
 
