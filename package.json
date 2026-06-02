@@ -13,8 +13,9 @@
     "dev": "vite build --watch",
     "start": "vite build && electron .",
     "dist": "cross-env ELECTRON_DIST=1 vite build && npm run dist:linux && npm run dist:win && npm run dist:mac",
-    "dist:linux": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux deb AppImage pacman --publish never",
+    "dist:linux": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux deb rpm AppImage pacman --publish never",
     "dist:deb": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux deb --publish never",
+    "dist:rpm": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux rpm --publish never",
     "dist:arch": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux pacman --publish never",
     "dist:appimage": "cross-env ELECTRON_DIST=1 vite build && electron-builder --linux AppImage --publish never",
     "dist:win": "cross-env ELECTRON_DIST=1 vite build && electron-builder --win --publish never",
@@ -52,6 +53,7 @@
       "!dist/*.dmg",
       "!dist/*.exe",
       "!dist/*.deb",
+      "!dist/*.rpm",
       "!dist/*.AppImage",
       "!dist/*.blockmap",
       "!dist/*.yaml",
@@ -138,6 +140,12 @@
           ]
         },
         {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "pacman",
           "arch": [
             "x64"
@@ -155,6 +163,15 @@
           "StartupWMClass": "Streambert"
         }
       }
+    },
+    "rpm": {
+      "packageCategory": "Applications/Multimedia",
+      "depends": [
+        "gtk3",
+        "libnotify",
+        "libXScrnSaver",
+        "nss"
+      ]
     },
     "electronLanguages": [
       "en-US",
