@@ -7,9 +7,9 @@
 [![Codeberg](https://img.shields.io/badge/Codeberg-truelockmc%2Fstreambert-2185D0?style=for-the-badge&logo=codeberg)](https://codeberg.org/truelockmc/streambert)
 [![AUR Version](https://img.shields.io/aur/version/streambert-bin?style=for-the-badge&logo=archlinux)](https://aur.archlinux.org/packages/streambert-bin)
 # Streambert
-A cross-platform Electron Desktop App to stream and download any Movie, TV Series or Anime in the World. Zero Ads and Tracking <br></br>
+A cross-platform Electron Desktop App to stream and download any Movie, TV Series or Anime in the World. Zero Ads and Tracking[*](#privacy-disclaimer) <br></br>
 ![Logo](public/logo.svg)
-[Installation](https://github.com/truelockmc/streambert?tab=readme-ov-file#requirements)
+[Installation](#requirements)
 
 ## Why Streambert?
 - 🎦 **Streaming:** Stream any Movie, Anime or TV Series from around the World.
@@ -34,7 +34,7 @@ A cross-platform Electron Desktop App to stream and download any Movie, TV Serie
 [![Stargazers](https://reporoster.com/stars/dark/truelockmc/streambert)](https://github.com/truelockmc/streambert/stargazers)
 ---
 ## Streaming
-The Application mainly gets Video Streams from VidSrc (you can also Stream from videasy.net and 2Embed). <br></br>
+The Application mainly gets Video Streams from VidSrc (you can also Stream from videasy and vidking). <br></br>
 It fetches Information for Images, Info Texts, Search and Homepage from [tmdb](https://www.themoviedb.org/).
 
 ---
@@ -136,6 +136,12 @@ Forks may be created but they MUST stay open-sourced.
 ## Contributing
 Everyone is welcome to contribute to this project.
 Before contributing please make sure to read the [Contributing Guidelines](CONTRIBUTING.md) and act accordingly.
+
+## Privacy Disclaimer
+Streambert itself does not collect ANY data. There is no centralized service which the app relies on.
+However, the streaming sources and github (for downloading updates in-app) may still collect your data.
+
+Streambert has built-in tracker/- and adblocking, but obviously that is not perfect.
 
 ## Legal Disclaimer
 
